@@ -300,35 +300,57 @@ function QW.ChainProgress(full, chain)
     return n, #chain.quests
 end
 
--- Персонажи, которых показываем (свой текущий + друзья + выбранные альты)
-function QW.ViewedChars()
-    local out = { QW.me }
-    for _, p in ipairs(QW.db.settings.partners) do
-        if p ~= QW.me then out[#out + 1] = p end
-    end
-    return out
+-------------------------------------------------------------------------------
+-- Работа по частям (чтобы не было фриза на тысячах квестов)
+-------------------------------------------------------------------------------
+local runners = {}
+local function RunSliced(key, work, onDone, progressEvent)
+    if runners[key] then runners[key]:Cancel() end
+    local co = coroutine.create(work)
+    local ticker
+    ticker = C_Timer.NewTicker(0, function()
+        local ok, a, b = coroutine.resume(co)
+        if not ok then
+            ticker:Cancel(); runners[key] = nil
+            geterrorhandler()(a)
+            return
+        end
+        if coroutine.status(co) == "dead" then
+            ticker:Cancel(); runners[key] = nil
+            onDone(a or {})
+        elseif progressEvent then
+            QW.Fire(progressEvent, a, b)
+        end
+    end)
+    runners[key] = ticker
 end
 
--------------------------------------------------------------------------------
--- Построение списка цепочек (по частям, чтобы не было фриза)
--------------------------------------------------------------------------------
-local buildTicker
-function QW.BuildChains(chars, onDone)
-    local ids, seen = {}, {}
+-- Все квесты выбранных персонажей + карта, где квест сдан (из ленты)
+local function CollectQuests(chars)
+    local ids, seen, histMap = {}, {}, {}
     local function add(id)
         if id and not seen[id] then seen[id] = true; ids[#ids + 1] = id end
     end
     for _, full in ipairs(chars) do
         local ch = QW.db.chars[full]
         if ch then
-            for _, e in ipairs(ch.history or {}) do add(e[1]) end
+            for _, e in ipairs(ch.history or {}) do
+                add(e[1])
+                if e[3] and e[3] > 0 then histMap[e[1]] = e[3] end
+            end
             for id in pairs(ch.active or {}) do add(id) end
             for id in pairs(ch.done or {}) do add(id) end
         end
     end
+    return ids, histMap
+end
 
-    if buildTicker then buildTicker:Cancel() end
-    local co = coroutine.create(function()
+-------------------------------------------------------------------------------
+-- Построение списка цепочек
+-------------------------------------------------------------------------------
+function QW.BuildChains(chars, onDone)
+    local ids = CollectQuests(chars)
+    RunSliced("chains", function()
         local found, byKey = {}, {}
         for i, id in ipairs(ids) do
             local chain = QW.GetChain(id)
@@ -339,22 +361,126 @@ function QW.BuildChains(chars, onDone)
             if i % 150 == 0 then coroutine.yield(i, #ids) end
         end
         return found
-    end)
+    end, onDone, "CHAINS_PROGRESS")
+end
 
-    local ticker
-    ticker = C_Timer.NewTicker(0, function()
-        local ok, a, b = coroutine.resume(co)
-        if not ok then
-            ticker:Cancel()
-            geterrorhandler()(a)
-            return
+-------------------------------------------------------------------------------
+-- Зоны
+-- Откуда берём зону квеста (по порядку):
+--   1) заголовок журнала квестов, под которым квест был (QW.db.questZones)
+--   2) база Questie (zoneOrSort -> C_Map.GetAreaInfo)
+--   3) карта, на которой квест сдан (лента)
+-------------------------------------------------------------------------------
+local UIMAP = (Enum and Enum.UIMapType) or {}
+local ZONE_TYPE = UIMAP.Zone or 3
+local CONT_TYPE = UIMAP.Continent or 2
+
+local mapInfoCache = {}
+local function MapInfo(id)
+    if not id or id == 0 then return nil end
+    local v = mapInfoCache[id]
+    if v == nil then
+        v = (C_Map and C_Map.GetMapInfo and C_Map.GetMapInfo(id)) or false
+        mapInfoCache[id] = v
+    end
+    return v or nil
+end
+
+-- Карта (подземелье, микрозона...) -> название зоны и континента
+function QW.ZoneOfMap(mapID)
+    local zone, cont
+    local id, guard = mapID, 0
+    while id and id > 0 and guard < 12 do
+        guard = guard + 1
+        local info = MapInfo(id)
+        if not info then break end
+        if not zone and info.mapType == ZONE_TYPE then zone = info end
+        if info.mapType == CONT_TYPE then cont = info break end
+        id = info.parentMapID
+    end
+    if not zone then
+        local info = MapInfo(mapID)
+        if info and info.mapType and info.mapType > ZONE_TYPE then zone = info end
+    end
+    return zone and zone.name, cont and cont.name
+end
+
+-- Индекс "название зоны -> континент" по всем картам клиента
+local zoneCont, zoneIndexOK = {}, false
+local function BuildZoneIndex()
+    if zoneIndexOK or not (C_Map and C_Map.GetMapChildrenInfo) then return end
+    local id, root, guard = QW.CurrentMapID(), nil, 0
+    while id and id > 0 and guard < 12 do
+        guard = guard + 1
+        local info = MapInfo(id)
+        if not info then break end
+        root = id
+        id = info.parentMapID
+    end
+    if not root then return end
+    local ok, list = pcall(C_Map.GetMapChildrenInfo, root, ZONE_TYPE, true)
+    if not ok or type(list) ~= "table" or #list == 0 then return end
+    for _, z in ipairs(list) do
+        if z.name and z.name ~= "" and zoneCont[z.name] == nil then
+            local _, cont = QW.ZoneOfMap(z.mapID)
+            zoneCont[z.name] = cont or false
         end
-        if coroutine.status(co) == "dead" then
-            ticker:Cancel()
-            onDone(a or {})
-        else
-            QW.Fire("CHAINS_PROGRESS", a, b)
+    end
+    zoneIndexOK = true
+end
+
+function QW.CurrentZoneName()
+    local zone = QW.ZoneOfMap(QW.CurrentMapID())
+    return zone
+end
+
+local questZoneCache = {}
+function QW.QuestZone(id, histMap)
+    local zone = QW.db.questZones[id]
+    local cont
+    if not zone then
+        local c = questZoneCache[id]
+        if c then return c[1], c[2] end
+        local q = QuestieQuest(id)
+        local area = q and tonumber(q.zoneOrSort)
+        if area and area > 0 and C_Map and C_Map.GetAreaInfo then
+            local ok, n = pcall(C_Map.GetAreaInfo, area)
+            if ok and type(n) == "string" and n ~= "" then zone = n end
         end
-    end)
-    buildTicker = ticker
+    end
+    if zone then
+        BuildZoneIndex()
+        cont = zoneCont[zone] or nil
+        if not cont and histMap then
+            local _, c2 = QW.ZoneOfMap(histMap)
+            cont = c2
+        end
+    elseif histMap then
+        zone, cont = QW.ZoneOfMap(histMap)
+    end
+    if zone and not QW.db.questZones[id] then questZoneCache[id] = { zone, cont } end
+    return zone, cont
+end
+
+-- zones = { { name, cont, quests = {id,...} }, ... }
+function QW.BuildZones(chars, onDone)
+    local ids, histMap = CollectQuests(chars)
+    RunSliced("zones", function()
+        local byName, list = {}, {}
+        for i, id in ipairs(ids) do
+            local zone, cont = QW.QuestZone(id, histMap[id])
+            if zone then
+                local z = byName[zone]
+                if not z then
+                    z = { name = zone, cont = cont, quests = {} }
+                    byName[zone] = z
+                    list[#list + 1] = z
+                end
+                if cont and not z.cont then z.cont = cont end
+                z.quests[#z.quests + 1] = id
+            end
+            if i % 150 == 0 then coroutine.yield(i, #ids) end
+        end
+        return list
+    end, onDone, "ZONES_PROGRESS")
 end

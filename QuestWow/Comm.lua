@@ -7,7 +7,7 @@ local PREFIX = "QuestWow"
 local PROTO = 1
 local MAX_LEN = 240           -- лимит аддон-сообщения 255 байт, оставляем запас
 local SEND_INTERVAL = 0.3     -- пауза между сообщениями
-local THROTTLE_BACKOFF = 2.0  -- пауза, если клиент сказал «слишком часто»
+local THROTTLE_BACKOFF = 2.0  -- пауза, если клиент сказал "слишком часто"
 
 local ToB36, FromB36 = QW.ToB36, QW.FromB36
 
@@ -106,8 +106,11 @@ end
 -------------------------------------------------------------------------------
 local function KnownOffline(full)
     if not (C_FriendList and C_FriendList.GetFriendInfo) then return false end
-    local info = C_FriendList.GetFriendInfo(QW.ShortName(full)) or C_FriendList.GetFriendInfo(full)
-    if info and info.connected == false then return true end
+    local ok, info = pcall(C_FriendList.GetFriendInfo, full)
+    if not (ok and info) and not QW.surnames then
+        ok, info = pcall(C_FriendList.GetFriendInfo, QW.ShortName(full))
+    end
+    if ok and info and info.connected == false then return true end
     return false
 end
 
@@ -120,7 +123,7 @@ end
 -- Исходящие
 -------------------------------------------------------------------------------
 function Comm.Hello(target, isReply)
-    if not QW.me or not target or target == QW.me then return end
+    if not QW.me or not target or QW.IsMe(target) then return end
     if not isReply and KnownOffline(target) then return end
     local ch = QW.GetChar(QW.me, true)
     Send(target, table.concat({
@@ -317,14 +320,22 @@ ev:SetScript("OnEvent", function(_, event, prefix, msg, channel, sender)
     end
     if IsSecret(prefix) or IsSecret(msg) or IsSecret(sender) then return end
     if prefix ~= PREFIX or channel ~= "WHISPER" then return end
-    local full = QW.FullName(sender)
-    if not full or full == QW.me then return end
-    if not QW.IsPartner(full) then
-        if not notPartnerWarned[full] then
-            notPartnerWarned[full] = true
-            QW.Print(full .. " хочет поделиться квестами. Чтобы принять: |cffffd100/qw add " .. full .. "|r")
+    if not sender or QW.IsMe(sender) then return end
+    -- Отправитель может прийти как "Имя Фамилия", "Имя Фамилия-..." или "Имя-Сервер":
+    -- сопоставляем с сохранённым именем друга
+    local full = QW.FindPartner(sender)
+    if not full then
+        local shown = QW.FullName(sender) or sender
+        if not notPartnerWarned[shown] then
+            notPartnerWarned[shown] = true
+            QW.Print(shown .. " хочет поделиться квестами. Чтобы принять: |cffffd100/qw add " .. shown .. "|r")
         end
         return
+    end
+    -- Узнали полное имя друга, а сохранено только имя — уточняем
+    local exact = QW.FullName(sender)
+    if exact and exact ~= full and not QW.IsCompleteName(full) and QW.IsCompleteName(exact) then
+        full = QW.AddPartner(exact) or full
     end
     Comm.online[full] = time()
     local f = { strsplit(":", msg) }
@@ -336,7 +347,7 @@ ev:SetScript("OnEvent", function(_, event, prefix, msg, channel, sender)
 end)
 
 -------------------------------------------------------------------------------
--- Прячем системное «Персонаж не найден», если это наш скрытый пинг другу
+-- Прячем системное "Персонаж не найден", если это наш скрытый пинг другу
 -------------------------------------------------------------------------------
 local notFoundPattern
 local function BuildPattern()
@@ -351,7 +362,7 @@ local function SystemFilter(_, _, msg)
     if not notFoundPattern then return false end
     local name = msg:match(notFoundPattern)
     if not name then return false end
-    local full = QW.FullName(name)
+    local full = QW.FindPartner(name)
     local t = full and Comm.lastSent[full]
     if t and GetTime() - t < 10 then
         Comm.online[full] = nil

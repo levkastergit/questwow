@@ -2,7 +2,7 @@
 local ADDON, QW = ...
 _G.QuestWow = QW
 
-QW.VERSION = "1.0.0"
+QW.VERSION = "1.1.0"
 QW.DB_VERSION = 1
 
 -------------------------------------------------------------------------------
@@ -31,25 +31,102 @@ function QW.Print(...)
     DEFAULT_CHAT_FRAME:AddMessage("|cffffd100Quest|r|cff66ccffWow|r: " .. msg)
 end
 
--- "Имя-Сервер" для любого имени
+function QW.IsSecret(v)
+    return issecretvalue and issecretvalue(v) or false
+end
+
+-- string.lower/upper в Lua не трогают кириллицу (UTF-8) — переводим А-Я и Ё вручную
+function QW.ULower(s)
+    s = s:lower()
+    s = s:gsub("\208([\144-\175])", function(c)
+        local b = c:byte()
+        if b < 160 then return "\208" .. string.char(b + 32) end
+        return "\209" .. string.char(b - 32)
+    end)
+    s = s:gsub("\208\129", "\209\145")
+    return s
+end
+
+-- Первая буква слова заглавная (латиница и кириллица)
+local function Cap(word)
+    local b1, b2 = word:byte(1, 2)
+    if not b1 then return word end
+    if b1 >= 97 and b1 <= 122 then
+        return string.char(b1 - 32) .. word:sub(2)
+    elseif b1 == 208 and b2 and b2 >= 176 and b2 <= 191 then       -- а-п
+        return "\208" .. string.char(b2 - 32) .. word:sub(3)
+    elseif b1 == 209 and b2 and b2 >= 128 and b2 <= 143 then       -- р-я
+        return "\208" .. string.char(b2 + 32) .. word:sub(3)
+    elseif b1 == 209 and b2 == 145 then                            -- ё
+        return "\208\129" .. word:sub(3)
+    end
+    return word
+end
+
+-------------------------------------------------------------------------------
+-- Имена персонажей
+-- WoW Forever: серверов нет, у персонажа имя + фамилия. UnitName() возвращает
+-- их двумя значениями, а шёпот адресуется как "Имя Фамилия".
+-- Обычный WoW: "Имя-Сервер".
+-------------------------------------------------------------------------------
+QW.surnames = false
+
 function QW.FullName(name)
-    if not name or name == "" then return nil end
-    name = name:gsub("%s+", "")
+    if type(name) ~= "string" or QW.IsSecret(name) then return nil end
+    name = (name:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " "))
+    if name == "" then return nil end
+    if QW.surnames then
+        -- "Имя Фамилия", "Имя-Фамилия", "Имя Фамилия-Что-то" -> "Имя Фамилия"
+        local a, b = name:match("^([^%s%-]+)[%s%-]+([^%s%-]+)")
+        if a then return Cap(a) .. " " .. Cap(b) end
+        return Cap(name)  -- только имя: неполное, шёпот может не дойти
+    end
     if not name:find("-", 1, true) then
         local realm = GetNormalizedRealmName and GetNormalizedRealmName()
-        if realm and realm ~= "" then
-            name = name .. "-" .. realm
-        end
+        if realm and realm ~= "" then name = name .. "-" .. realm end
     end
-    -- Первая буква имени заглавная (Кириллица в UTF-8 не трогаем)
-    local first = name:sub(1, 1)
-    if first:match("%l") then name = first:upper() .. name:sub(2) end
-    return name
+    return Cap(name)
+end
+
+-- Ключ для сравнения имён без учёта регистра
+function QW.NameKey(name)
+    local full = QW.FullName(name)
+    return full and QW.ULower(full) or nil
+end
+
+function QW.SameName(a, b)
+    local ka, kb = QW.NameKey(a), QW.NameKey(b)
+    return ka ~= nil and ka == kb
+end
+
+-- В режиме фамилий имя без фамилии считается неполным
+function QW.IsCompleteName(full)
+    if not QW.surnames then return true end
+    return full and full:find(" ", 1, true) ~= nil
+end
+
+-- Полное имя игрока по юниту ("party1", "target"...)
+function QW.UnitId(unit)
+    if not UnitExists(unit) or not UnitIsPlayer(unit) then return nil end
+    local a, b = UnitName(unit)
+    if QW.IsSecret(a) or QW.IsSecret(b) then return nil end
+    if not a or a == "" or a == UNKNOWNOBJECT then return nil end
+    if b and b ~= "" then
+        return QW.FullName(a .. (QW.surnames and " " or "-") .. b)
+    end
+    return QW.FullName(a)
 end
 
 function QW.ShortName(full)
     if not full then return "?" end
-    return (full:match("^([^-]+)")) or full
+    return (full:match("^([^%s%-]+)")) or full
+end
+
+-- Для показа: в Forever "Имя Фамилия", в обычном WoW просто имя
+function QW.DisplayName(full)
+    if not full then return "?" end
+    if QW.surnames then return full end
+    return QW.ShortName(full)
 end
 
 function QW.ClassColorHex(class)
@@ -73,9 +150,11 @@ function QW.ClassRGB(class)
     return 0.8, 0.8, 0.8
 end
 
-function QW.ColoredName(full)
+-- short = true: только имя (для узких колонок)
+function QW.ColoredName(full, short)
     local ch = QW.db and QW.db.chars[full]
-    return "|c" .. QW.ClassColorHex(ch and ch.class) .. QW.ShortName(full) .. "|r"
+    local text = short and QW.ShortName(full) or QW.DisplayName(full)
+    return "|c" .. QW.ClassColorHex(ch and ch.class) .. text .. "|r"
 end
 
 -------------------------------------------------------------------------------
@@ -105,10 +184,12 @@ local DEFAULTS = {
         notify = true,          -- сообщать в чат о квестах друга
         hideUntitled = true,    -- скрывать служебные квесты без названия
         scale = 1.0,
+        chainFilter = "all",    -- all | mine | everyone — какие пройденные цепочки скрывать
         minimap = { angle = 215, hide = false },
     },
     chars = {},                 -- [full] = { class, level, own, history = {{id,t,map,lvl}}, done = {[id]=true}, doneCount, active = {[id]=true}, updated }
     titles = {},                -- [questID] = "название"
+    questZones = {},            -- [questID] = "зона" (из заголовков журнала квестов)
 }
 
 local function ApplyDefaults(dst, src)
@@ -131,20 +212,66 @@ function QW.GetChar(full, create)
     return ch
 end
 
-function QW.IsPartner(full)
-    for _, p in ipairs(QW.db.settings.partners) do
-        if p == full then return true end
+-- Найти друга по любому написанию имени. Возвращает имя, как оно сохранено.
+function QW.FindPartner(name)
+    local key = QW.NameKey(name)
+    if not key then return nil end
+    local partners = QW.db.settings.partners
+    for _, p in ipairs(partners) do
+        if QW.ULower(p) == key then return p end
     end
-    return false
+    -- Пришло только имя без фамилии: совпадение по имени, если оно однозначно
+    if QW.surnames and not key:find(" ", 1, true) then
+        local found
+        for _, p in ipairs(partners) do
+            if QW.ULower(QW.ShortName(p)) == key then
+                if found then return nil end
+                found = p
+            end
+        end
+        return found
+    end
+    return nil
+end
+
+function QW.IsPartner(name)
+    return QW.FindPartner(name) ~= nil
+end
+
+function QW.IsMe(name)
+    return QW.me ~= nil and QW.SameName(name, QW.me)
 end
 
 function QW.AddPartner(name)
     local full = QW.FullName(name)
-    if not full or full == QW.me then return nil end
-    if not QW.IsPartner(full) then
+    if not full or QW.IsMe(full) then return nil end
+    local existing = QW.FindPartner(full)
+    if not existing and QW.surnames and QW.IsCompleteName(full) then
+        -- Был сохранён только по имени ("Лев") — теперь знаем фамилию
+        local first = QW.ULower(QW.ShortName(full))
+        for _, p in ipairs(QW.db.settings.partners) do
+            if not QW.IsCompleteName(p) and QW.ULower(p) == first then existing = p break end
+        end
+    end
+    if existing and existing ~= full and not QW.IsCompleteName(existing) then
+        -- Было "Имя", теперь "Имя Фамилия" — переносим данные
+        QW.RemovePartner(existing)
+        if QW.db.chars[existing] and not QW.db.chars[full] then
+            QW.db.chars[full] = QW.db.chars[existing]
+        end
+        QW.db.chars[existing] = nil
+        existing = nil
+    end
+    if not existing then
         table.insert(QW.db.settings.partners, full)
+    else
+        full = existing
     end
     QW.GetChar(full, true)
+    if not QW.IsCompleteName(full) then
+        QW.Print("|cffff6060Внимание:|r в WoW Forever нужно указывать имя и фамилию, например |cffffd100/qw add "
+            .. full .. " Фамилия|r. Только по имени сообщения могут не дойти.")
+    end
     QW.Fire("DATA_CHANGED")
     return full
 end
@@ -152,9 +279,48 @@ end
 function QW.RemovePartner(full)
     local list = QW.db.settings.partners
     for i = #list, 1, -1 do
-        if list[i] == full then table.remove(list, i) end
+        if QW.SameName(list[i], full) then table.remove(list, i) end
     end
     QW.Fire("DATA_CHANGED")
+end
+
+-- Переход со старых ключей "Имя-Сервер" на "Имя Фамилия" (версия 1.0.0)
+local function MigrateNames()
+    if not QW.surnames then return end
+    local chars = QW.db.chars
+    local myFirst = QW.ULower(QW.ShortName(QW.me))
+    local old = {}
+    for full, ch in pairs(chars) do
+        if full ~= QW.me and full:find("-", 1, true) and not full:find(" ", 1, true)
+            and ch.own and QW.ULower(QW.ShortName(full)) == myFirst then
+            old[#old + 1] = full
+        end
+    end
+    for _, full in ipairs(old) do
+        local ch = chars[full]
+        do
+            local cur = chars[QW.me]
+            if not cur or #(cur.history or {}) == 0 then
+                chars[QW.me] = ch
+            else
+                for _, e in ipairs(ch.history or {}) do table.insert(cur.history, e) end
+                table.sort(cur.history, function(x, y) return x[2] < y[2] end)
+            end
+            chars[full] = nil
+        end
+    end
+    -- Друзья, добавленные как "Имя-Сервер": оставляем только имя
+    local partners = QW.db.settings.partners
+    for i, p in ipairs(partners) do
+        if p:find("-", 1, true) and not p:find(" ", 1, true) then
+            local short = QW.ShortName(p)
+            partners[i] = short
+            if chars[p] and not chars[short] then chars[short] = chars[p] end
+            chars[p] = nil
+            QW.Print("Друг |cffffd100" .. short .. "|r сохранён без фамилии. Добавь заново с фамилией: |cffffd100/qw add "
+                .. short .. " Фамилия|r")
+        end
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -193,13 +359,20 @@ end
 function QW.RefreshActive()
     local ch = QW.GetChar(QW.me, true)
     local active = {}
+    local header
     if C_QuestLog and C_QuestLog.GetNumQuestLogEntries then
         for i = 1, C_QuestLog.GetNumQuestLogEntries() do
             local info = C_QuestLog.GetInfo(i)
-            if info and not info.isHeader and info.questID and info.questID > 0 and not info.isHidden then
+            if info and info.isHeader then
+                header = info.title
+            elseif info and info.questID and info.questID > 0 and not info.isHidden then
                 active[info.questID] = true
                 if info.title and info.title ~= "" then
                     QW.db.titles[info.questID] = info.title
+                end
+                -- Заголовок журнала = зона квеста (или категория)
+                if header and header ~= "" and not QW.IsSecret(header) then
+                    QW.db.questZones[info.questID] = header
                 end
             end
         end
@@ -257,11 +430,26 @@ SlashCmdList.QUESTWOW = function(msg)
     elseif cmd == "chain" and tonumber(rest) then
         QW.UI.Show()
         QW.UI.ShowChainFor(tonumber(rest))
+    elseif cmd == "zone" then
+        QW.UI.Show()
+        QW.UI.ShowZone(rest ~= "" and rest or nil)
+    elseif cmd == "minimap" then
+        local mm = QW.db.settings.minimap
+        if rest == "reset" then
+            mm.angle, mm.free, mm.hide = 215, nil, false
+        else
+            mm.hide = not mm.hide
+        end
+        QW.Minimap.Update()
+        QW.Print("Кнопка у миникарты: " .. (mm.hide and "скрыта" or "показана"))
     else
+        local who = QW.surnames and "Имя Фамилия" or "Имя[-Сервер]"
         QW.Print("Команды:")
         QW.Print("/qw — открыть окно")
-        QW.Print("/qw add Имя[-Сервер] — добавить друга")
-        QW.Print("/qw del Имя[-Сервер] — удалить друга")
+        QW.Print("/qw add " .. who .. " — добавить друга")
+        QW.Print("/qw del " .. who .. " — удалить друга")
+        QW.Print("/qw zone [зона] — квесты по зонам (без имени — текущая)")
+        QW.Print("/qw minimap — показать/скрыть кнопку у миникарты (reset — вернуть на место)")
         QW.Print("/qw sync — синхронизировать")
         QW.Print("/qw link <ID> — линк квеста в чат")
         QW.Print("/qw chain <ID> — цепочка квеста")
@@ -302,9 +490,17 @@ ev:SetScript("OnEvent", function(_, event, arg1)
         QuestWowDB.dbVersion = QW.DB_VERSION
         QW.db = QuestWowDB
     elseif event == "PLAYER_LOGIN" then
-        local name, realm = UnitFullName("player")
-        realm = (realm and realm ~= "") and realm or GetNormalizedRealmName()
-        QW.me = name .. "-" .. realm
+        -- В Forever второе значение UnitName("player") — фамилия (в обычном WoW тут nil)
+        local first, second = UnitName("player")
+        QW.surnames = second ~= nil and second ~= "" and not QW.IsSecret(second)
+        if QW.surnames then
+            QW.me = QW.FullName(first .. " " .. second)
+        else
+            local name, realm = UnitFullName("player")
+            realm = (realm and realm ~= "") and realm or GetNormalizedRealmName() or ""
+            QW.me = QW.FullName(realm ~= "" and (name .. "-" .. realm) or name)
+        end
+        MigrateNames()
         local ch = QW.GetChar(QW.me, true)
         ch.own = true
         ch.class = select(2, UnitClass("player"))
