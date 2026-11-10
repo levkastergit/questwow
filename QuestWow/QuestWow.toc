@@ -2,7 +2,7 @@
 ## Title: |cffffd100Quest|r|cff66ccffWow|r
 ## Notes: Цепочки квестов — твои и друга. Синхронизация и быстрые линки.
 ## Author: Questwow
-## Version: 1.2.1
+## Version: 1.3.0
 ## SavedVariables: QuestWowDB
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
 ## AddonCompartmentFunc: QuestWow_OnCompartmentClick

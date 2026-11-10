@@ -87,6 +87,15 @@ function QW.Availability(id)
     return doable and "ok" or "prereq"
 end
 
+-- Классовый квест: в базе Questie у него задана маска классов requiredClasses
+-- (0 или пусто = для всех классов). nil — нет данных Questie по квесту.
+function QW.IsClassQuest(id)
+    local q = QuestieQuest(id)
+    if not q then return nil end
+    local rc = tonumber(q.requiredClasses)
+    return rc ~= nil and rc ~= 0
+end
+
 -- Квест "серый" (мало опыта). Нужна GetQuestGreenRange, иначе nil.
 function QW.IsTrivial(id)
     local lvl = QW.GetQuestLevel(id)

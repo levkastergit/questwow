@@ -94,6 +94,50 @@ local function Checkbox(parent, label, get, set)
     return b
 end
 
+-- Тумблер: [ (o)    ] выкл  ->  [    (o) ] вкл
+local function Toggle(parent, label, get, set)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(220, 22)
+    local track = CreateFrame("Frame", nil, b, "BackdropTemplate")
+    track:SetSize(34, 16)
+    track:SetPoint("LEFT")
+    SetBD(track, C.panel2)
+    local knob = track:CreateTexture(nil, "OVERLAY")
+    knob:SetSize(12, 12)
+    knob:SetTexture(WHITE)
+    local t = Text(b, "GameFontHighlightSmall", 12, C.text)
+    t:SetPoint("LEFT", track, "RIGHT", 8, 0)
+    t:SetText(label)
+    b.label = t
+    function b:Update()
+        local on = get() and true or false
+        knob:ClearAllPoints()
+        if on then
+            knob:SetPoint("RIGHT", track, "RIGHT", -2, 0)
+            knob:SetVertexColor(C.gold[1], C.gold[2], C.gold[3])
+            track:SetBackdropColor(0.30, 0.24, 0.08, 1)
+            track:SetBackdropBorderColor(0.55, 0.45, 0.15, 1)
+        else
+            knob:SetPoint("LEFT", track, "LEFT", 2, 0)
+            knob:SetVertexColor(0.45, 0.45, 0.5)
+            track:SetBackdropColor(unpack(C.panel2))
+            track:SetBackdropBorderColor(unpack(C.border))
+        end
+        t:SetTextColor(on and 1 or C.text[1], on and 1 or C.text[2], on and 1 or C.text[3])
+    end
+    b:SetScript("OnClick", function(self) set(not get()); self:Update() end)
+    b:SetScript("OnEnter", function(self)
+        if self.tip then
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(self.tip, 1, 1, 1, 1, true)
+            GameTooltip:Show()
+        end
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    b:Update()
+    return b
+end
+
 -------------------------------------------------------------------------------
 -- Виртуальный список с прокруткой
 -------------------------------------------------------------------------------
@@ -1338,8 +1382,15 @@ local function BuildComparePage(page)
     end)
 
     page.header = CreateColHeader(page)
-    page.header:SetPoint("TOPLEFT", 0, -30)
-    page.header:SetPoint("TOPRIGHT", 0, -30)
+    page.classToggle = Toggle(page, "Скрыть классовые квесты",
+        function() return QW.db.settings.hideClassQuests end,
+        function(v) QW.db.settings.hideClassQuests = v; page:Refresh() end)
+    page.classToggle:SetPoint("TOPLEFT", 2, -32)
+    page.classToggle.tip = "Убирает квесты только для определённых классов (поле requiredClasses в базе Questie).\n"
+        .. "Полезно, если вы с другом разных классов. Без Questie класс квеста неизвестен."
+
+    page.header:SetPoint("TOPLEFT", 0, -60)
+    page.header:SetPoint("TOPRIGHT", 0, -60)
     local ht = Text(page.header, "GameFontNormalSmall", 10, C.dim)
     ht:SetPoint("LEFT", 8, 0)
     ht:SetText("КВЕСТ  /  ID")
@@ -1407,15 +1458,19 @@ local function BuildComparePage(page)
 
         QW.RequestTitles(ids)
         local hide = QW.db.settings.hideUntitled
-        local data, hidden = {}, 0
+        local hideClass = QW.db.settings.hideClassQuests
+        local data, hidden, hiddenClass = {}, 0, 0
         for _, id in ipairs(ids) do
             local title = QW.GetTitle(id, true)
-            if (title or not hide) and MatchSearch(UI.search, id, title) then
+            if hideClass and QW.IsClassQuest(id) then
+                hiddenClass = hiddenClass + 1
+            elseif (title or not hide) and MatchSearch(UI.search, id, title) then
                 data[#data + 1] = { id = id, title = title or "" }
             elseif not title then
                 hidden = hidden + 1
             end
         end
+        self.classToggle:Update()
         table.sort(data, function(a, b)
             if a.title ~= b.title then return a.title < b.title end
             return a.id < b.id
@@ -1423,7 +1478,9 @@ local function BuildComparePage(page)
         self.list:SetData(data, true)
         self.empty:SetText("Здесь пусто.")
         self.empty:SetShown(#data == 0)
-        UI.SetStatus(#data .. " квестов" .. (hidden > 0 and ("  /  скрыто служебных/незагруженных: " .. hidden) or ""))
+        UI.SetStatus(#data .. " квестов"
+            .. (hiddenClass > 0 and ("  /  скрыто классовых: " .. hiddenClass) or "")
+            .. (hidden > 0 and ("  /  скрыто служебных/незагруженных: " .. hidden) or ""))
     end
 end
 
