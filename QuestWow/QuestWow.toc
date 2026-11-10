@@ -1,0 +1,15 @@
+## Interface: 16001, 120105
+## Title: |cffffd100Quest|r|cff66ccffWow|r
+## Notes: Цепочки квестов — твои и друга. Синхронизация и быстрые линки.
+## Author: Questwow
+## Version: 1.0.0
+## SavedVariables: QuestWowDB
+## IconTexture: Interface\Icons\INV_Misc_Book_09
+## AddonCompartmentFunc: QuestWow_OnCompartmentClick
+## OptionalDeps: Questie
+
+Core.lua
+Data.lua
+Comm.lua
+UI.lua
+Minimap.lua
