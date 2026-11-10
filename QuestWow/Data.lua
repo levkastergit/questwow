@@ -29,6 +29,46 @@ function QW.HasQuestie()
     return GetQuestieDB() ~= nil
 end
 
+local function QuestieModule(name)
+    if not QuestieLoader or not QuestieLoader.ImportModule then return nil end
+    local ok, m = pcall(QuestieLoader.ImportModule, QuestieLoader, name)
+    if ok and type(m) == "table" then return m end
+    return nil
+end
+
+-- База Questie загружена (QuestPointers появляется после инициализации Questie)
+function QW.QuestieReady()
+    local db = GetQuestieDB()
+    if not db then return false end
+    if Questie and Questie.API and Questie.API.isReady ~= nil then
+        return Questie.API.isReady == true
+    end
+    return db.QuestPointers ~= nil
+end
+
+-- Можно ли взять квест прямо сейчас (по данным Questie: раса, класс, уровень,
+-- предыдущие квесты). nil — Questie недоступен.
+function QW.IsDoable(id)
+    local db = GetQuestieDB()
+    if not db or type(db.IsDoable) ~= "function" or not QW.QuestieReady() then return nil end
+    local ok, r = pcall(db.IsDoable, id)
+    if not ok then return nil end
+    return r and true or false
+end
+
+-- Пояснение Questie, почему квест доступен/недоступен
+function QW.DoableText(id)
+    local db = GetQuestieDB()
+    if not db or type(db.IsDoableVerbose) ~= "function" or not QW.QuestieReady() then return nil end
+    local ok, text = pcall(db.IsDoableVerbose, id, false, true, true)
+    if ok and type(text) == "string" and text ~= "" then return text end
+    return nil
+end
+
+function QW.QuestieInfo(id)
+    return QuestieQuest(id)
+end
+
 -------------------------------------------------------------------------------
 -- Названия квестов
 -------------------------------------------------------------------------------
@@ -106,10 +146,36 @@ function QW.TitleOrID(id)
     return QW.GetTitle(id) or ("Квест #" .. id)
 end
 
+-- Уровень квеста: база Questie, иначе клиент (работает для известных клиенту квестов)
+local levelCache = {}
 function QW.GetQuestLevel(id)
+    if levelCache[id] then return levelCache[id] end
+    local lvl
     local q = QuestieQuest(id)
-    if q and tonumber(q.questLevel or q.level) then return tonumber(q.questLevel or q.level) end
+    if q then lvl = tonumber(q.questLevel or q.level) end
+    if (not lvl or lvl <= 0) and C_QuestLog and C_QuestLog.GetQuestDifficultyLevel then
+        local ok, l = pcall(C_QuestLog.GetQuestDifficultyLevel, id)
+        if ok and tonumber(l) and l > 0 then lvl = l end
+    end
+    if lvl and lvl > 0 then
+        levelCache[id] = lvl
+        return lvl
+    end
     return nil
+end
+
+-- "[12] " цветом сложности (как в журнале квестов) или пустая строка
+function QW.LevelTag(id)
+    local lvl = QW.GetQuestLevel(id)
+    if not lvl then return "" end
+    local hex = "ff999999"
+    if GetQuestDifficultyColor then
+        local ok, c = pcall(GetQuestDifficultyColor, lvl)
+        if ok and type(c) == "table" and c.r then
+            hex = string.format("ff%02x%02x%02x", c.r * 255, c.g * 255, c.b * 255)
+        end
+    end
+    return "|c" .. hex .. "[" .. lvl .. "]|r "
 end
 
 -------------------------------------------------------------------------------
@@ -374,6 +440,7 @@ end
 local UIMAP = (Enum and Enum.UIMapType) or {}
 local ZONE_TYPE = UIMAP.Zone or 3
 local CONT_TYPE = UIMAP.Continent or 2
+local DUNGEON_TYPE = UIMAP.Dungeon or 4
 
 local mapInfoCache = {}
 local function MapInfo(id)
@@ -394,7 +461,8 @@ function QW.ZoneOfMap(mapID)
         guard = guard + 1
         local info = MapInfo(id)
         if not info then break end
-        if not zone and info.mapType == ZONE_TYPE then zone = info end
+        -- Подземелье считаем отдельной "зоной", микрозоны поднимаем до зоны
+        if not zone and (info.mapType == ZONE_TYPE or info.mapType == DUNGEON_TYPE) then zone = info end
         if info.mapType == CONT_TYPE then cont = info break end
         id = info.parentMapID
     end
@@ -434,6 +502,29 @@ function QW.CurrentZoneName()
     return zone
 end
 
+-- areaId Questie -> название зоны и континента (через uiMapID, как у остальных зон)
+local areaCache = {}
+local function AreaToZone(areaId)
+    local c = areaCache[areaId]
+    if c then return c[1] or nil, c[2] end
+    local zone, cont
+    local zdb = QuestieModule("ZoneDB")
+    if zdb and type(zdb.GetUiMapIdByAreaId) == "function" then
+        local ok, ui = pcall(zdb.GetUiMapIdByAreaId, zdb, areaId)
+        if ok and tonumber(ui) and ui > 0 then zone, cont = QW.ZoneOfMap(ui) end
+    end
+    if not zone and C_Map and C_Map.GetAreaInfo then
+        local ok, n = pcall(C_Map.GetAreaInfo, areaId)
+        if ok and type(n) == "string" and n ~= "" then
+            zone = n
+            BuildZoneIndex()
+            cont = zoneCont[n] or nil
+        end
+    end
+    areaCache[areaId] = { zone or false, cont }
+    return zone, cont
+end
+
 local questZoneCache = {}
 function QW.QuestZone(id, histMap)
     local zone = QW.db.questZones[id]
@@ -443,43 +534,101 @@ function QW.QuestZone(id, histMap)
         if c then return c[1], c[2] end
         local q = QuestieQuest(id)
         local area = q and tonumber(q.zoneOrSort)
-        if area and area > 0 and C_Map and C_Map.GetAreaInfo then
-            local ok, n = pcall(C_Map.GetAreaInfo, area)
-            if ok and type(n) == "string" and n ~= "" then zone = n end
-        end
+        if area and area > 0 then zone, cont = AreaToZone(area) end
     end
-    if zone then
+    if zone and not cont then
         BuildZoneIndex()
         cont = zoneCont[zone] or nil
         if not cont and histMap then
             local _, c2 = QW.ZoneOfMap(histMap)
             cont = c2
         end
-    elseif histMap then
+    elseif not zone and histMap then
         zone, cont = QW.ZoneOfMap(histMap)
     end
     if zone and not QW.db.questZones[id] then questZoneCache[id] = { zone, cont } end
     return zone, cont
 end
 
--- zones = { { name, cont, quests = {id,...} }, ... }
+-------------------------------------------------------------------------------
+-- Все квесты по зонам из базы Questie (с учётом расы и класса — так делает
+-- сам Questie в ZoneDB.GetZonesWithQuests). Строится один раз за сессию.
+-------------------------------------------------------------------------------
+local questieZones
+function QW.GetQuestieZones()
+    if questieZones ~= nil then return questieZones or nil end
+    if not QW.QuestieReady() then return nil end
+    local zdb = QuestieModule("ZoneDB")
+    if not (zdb and type(zdb.GetZonesWithQuests) == "function") then
+        questieZones = false
+        return nil
+    end
+    local ok, res = pcall(zdb.GetZonesWithQuests, false)
+    questieZones = (ok and type(res) == "table") and res or false
+    return questieZones or nil
+end
+
+-- Questie закончил загрузку — сбрасываем кэши, построенные без него
+local function OnQuestieReady()
+    questieZones = nil
+    wipe(areaCache)
+    wipe(questZoneCache)
+    QW.ClearChainCache()
+    QW.Fire("QUESTIE_READY")
+end
+
+QW.On("LOGIN", function()
+    if Questie and Questie.API and type(Questie.API.RegisterOnReady) == "function" then
+        pcall(Questie.API.RegisterOnReady, OnQuestieReady)
+    end
+end)
+
+-- zones = { { name, cont, quests = {id,...}, fromDB = {[id]=true} }, ... }
+-- fromDB — квест есть только в базе Questie: никто из показанных игроков его не брал
 function QW.BuildZones(chars, onDone)
     local ids, histMap = CollectQuests(chars)
     RunSliced("zones", function()
-        local byName, list = {}, {}
+        local byName, list, placed = {}, {}, {}
+        local function zoneFor(name, cont)
+            local z = byName[name]
+            if not z then
+                z = { name = name, cont = cont, quests = {}, fromDB = {} }
+                byName[name] = z
+                list[#list + 1] = z
+            end
+            if cont and not z.cont then z.cont = cont end
+            return z
+        end
         for i, id in ipairs(ids) do
             local zone, cont = QW.QuestZone(id, histMap[id])
             if zone then
-                local z = byName[zone]
-                if not z then
-                    z = { name = zone, cont = cont, quests = {} }
-                    byName[zone] = z
-                    list[#list + 1] = z
-                end
-                if cont and not z.cont then z.cont = cont end
+                local z = zoneFor(zone, cont)
                 z.quests[#z.quests + 1] = id
+                placed[id] = true
             end
             if i % 150 == 0 then coroutine.yield(i, #ids) end
+        end
+        -- Квесты из базы Questie, которые ещё никто не брал
+        local qz = QW.GetQuestieZones()
+        if qz then
+            local n = 0
+            for areaId, set in pairs(qz) do
+                if type(areaId) == "number" and areaId > 0 and type(set) == "table" then
+                    local zone, cont = AreaToZone(areaId)
+                    if zone then
+                        local z = zoneFor(zone, cont)
+                        for qid in pairs(set) do
+                            if type(qid) == "number" and not placed[qid] then
+                                placed[qid] = true
+                                z.quests[#z.quests + 1] = qid
+                                z.fromDB[qid] = true
+                            end
+                        end
+                    end
+                end
+                n = n + 1
+                if n % 15 == 0 then coroutine.yield(#ids, #ids) end
+            end
         end
         return list
     end, onDone, "ZONES_PROGRESS")

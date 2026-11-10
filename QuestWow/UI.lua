@@ -21,6 +21,7 @@ local C = {
 local WHITE = "Interface\\Buttons\\WHITE8x8"
 local ICON_DONE = "Interface\\RaidFrame\\ReadyCheck-Ready"
 local ICON_ACTIVE = "Interface\\RaidFrame\\ReadyCheck-Waiting"
+local ICON_AVAILABLE = "Interface\\GossipFrame\\AvailableQuestIcon"
 local ICON_ONLINE = "Interface\\FriendsFrame\\StatusIcon-Online"
 local ICON_OFFLINE = "Interface\\FriendsFrame\\StatusIcon-Offline"
 
@@ -256,6 +257,20 @@ local function CreateColHeader(parent)
     return h
 end
 
+-- "[10-14] " для списка квестов (цепочки) или пустая строка
+function UI.LevelRange(quests)
+    local lo, hi
+    for _, q in ipairs(quests) do
+        local l = QW.GetQuestLevel(q)
+        if l then
+            lo = (not lo or l < lo) and l or lo
+            hi = (not hi or l > hi) and l or hi
+        end
+    end
+    if not lo then return "" end
+    return "|cff999999[" .. (lo == hi and lo or (lo .. "-" .. hi)) .. "]|r "
+end
+
 -------------------------------------------------------------------------------
 -- Подсказка по квесту
 -------------------------------------------------------------------------------
@@ -267,6 +282,22 @@ local function ShowQuestTooltip(owner, questID, extra)
     end
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine("ID: " .. questID, 0.6, 0.6, 0.6)
+    local q = QW.QuestieInfo(questID)
+    if q then
+        local lvl, req = tonumber(q.questLevel or q.level), tonumber(q.requiredLevel)
+        if lvl or req then
+            GameTooltip:AddLine("Уровень квеста: " .. (lvl or "?") .. (req and ("  (взять можно с " .. req .. ")") or ""), 0.8, 0.8, 0.8)
+        end
+    end
+    if QW.QuestStatus(QW.me, questID) == nil then
+        local doable = QW.IsDoable(questID)
+        if doable == true then
+            GameTooltip:AddLine("Можно взять сейчас", 0.35, 0.9, 0.45)
+        elseif doable == false then
+            local why = QW.DoableText(questID)
+            GameTooltip:AddLine("Сейчас взять нельзя" .. (why and (": " .. why) or ""), 1, 0.45, 0.45, true)
+        end
+    end
     for _, full in ipairs(UI.VisibleChars()) do
         local st = QW.QuestStatus(full, questID)
         local s = st == "done" and "|cff5ce673выполнен|r" or st == "active" and "|cffffd100в процессе|r" or "|cff888888нет|r"
@@ -476,9 +507,9 @@ local function BuildFeedPage(page)
         row.bar:SetVertexColor(QW.ClassRGB(ch.class))
         row.when:SetText(date("%d.%m  %H:%M", it.t))
         row.who:SetText(QW.ColoredName(it.who, true))
-        row.title:SetText(QW.TitleOrID(it.id))
+        row.title:SetText(QW.LevelTag(it.id) .. QW.TitleOrID(it.id))
         local sub = MapName(it.map)
-        if it.lvl and it.lvl > 0 then sub = (sub ~= "" and (sub .. "  /  ") or "") .. "ур. " .. it.lvl end
+        if it.lvl and it.lvl > 0 then sub = (sub ~= "" and (sub .. "  /  ") or "") .. "твой ур. " .. it.lvl end
         row.sub:SetText(sub)
         UpdateStatusCols(row, UI.cols, it.id)
     end)
@@ -618,7 +649,7 @@ local function BuildChainsPage(page)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
         return row
     end, function(row, chain)
-        row.name:SetText(chain.name)
+        row.name:SetText(UI.LevelRange(chain.quests) .. chain.name)
         row.count:SetText(#chain.quests)
         row.sel:SetShown(UI.selectedChain and UI.selectedChain.key == chain.key)
         local n = math.max(1, #UI.cols)
@@ -736,7 +767,7 @@ local function BuildChainsPage(page)
         return row
     end, function(row, it, index)
         row.num:SetText(index)
-        row.title:SetText(QW.TitleOrID(it.id))
+        row.title:SetText(QW.LevelTag(it.id) .. QW.TitleOrID(it.id))
         local st = QW.QuestStatus(QW.me, it.id)
         if st == "done" then
             row.node:SetVertexColor(C.green[1], C.green[2], C.green[3])
@@ -748,7 +779,7 @@ local function BuildChainsPage(page)
             row.node:SetVertexColor(0.35, 0.35, 0.4)
             row.title:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
         end
-        row.title:SetText(QW.TitleOrID(it.id) .. (it.id == UI.focusQuest and "  |cff66ccff<<|r" or ""))
+        row.title:SetText(QW.LevelTag(it.id) .. QW.TitleOrID(it.id) .. (it.id == UI.focusQuest and "  |cff66ccff<<|r" or ""))
         UpdateStatusCols(row, UI.cols, it.id)
     end)
     page.stepList:SetPoint("TOPLEFT", page.stepHeader, "BOTTOMLEFT", 0, -2)
@@ -774,7 +805,7 @@ local function BuildChainsPage(page)
             self.btnLinkAll.nextIndex = nil
             self.btnLinkAll:SetLabel("Линк цепочки в чат")
         end
-        self.chainTitle:SetText(chain.name)
+        self.chainTitle:SetText(UI.LevelRange(chain.quests) .. chain.name)
         local src = chain.source == "questline" and "клиент игры (C_QuestLine)"
             or chain.source == "questie" and "база Questie" or "одиночный квест — цепочка не найдена"
         local prog = {}
@@ -870,6 +901,7 @@ local OTHER_CONT = "Другое"
 local ZONE_MODES = {
     { key = "all",    label = "Все квесты" },
     { key = "notme",  label = "Не сделано мной" },
+    { key = "avail",  label = "Можно взять" },
     { key = "chains", label = "Цепочки зоны" },
 }
 
@@ -1009,7 +1041,7 @@ local function BuildZonesPage(page)
     page.modeButtons = {}
     local prev
     for _, m in ipairs(ZONE_MODES) do
-        local b = FlatButton(right, m.label, 130, 22)
+        local b = FlatButton(right, m.label, 112, 22)
         if prev then b:SetPoint("LEFT", prev, "RIGHT", 6, 0) else b:SetPoint("TOPLEFT", page.sub, "BOTTOMLEFT", 0, -10) end
         b.key = m.key
         b:SetScript("OnClick", function() page.mode = m.key; page:ShowZone() end)
@@ -1025,8 +1057,12 @@ local function BuildZonesPage(page)
 
     page.list = CreateList(right, 26, function(list)
         local row = BaseRow(list, true)
+        row.avail = row:CreateTexture(nil, "OVERLAY")
+        row.avail:SetSize(14, 14)
+        row.avail:SetPoint("LEFT", 6, 0)
+        row.avail:SetTexture(ICON_AVAILABLE)
         row.title = Text(row, "GameFontNormal", 12, C.gold)
-        row.title:SetPoint("LEFT", 10, 0)
+        row.title:SetPoint("LEFT", 24, 0)
         row.title:SetPoint("RIGHT", -(MAX_COLS * COL_W) - 70, 0)
         row.id = Text(row, "GameFontDisableSmall", 10, C.dim, "RIGHT")
         row.id:SetPoint("RIGHT", -(MAX_COLS * COL_W) - 6, 0)
@@ -1071,7 +1107,9 @@ local function BuildZonesPage(page)
         return row
     end, function(row, it)
         if it.chain then
-            row.title:SetText(it.chain.name)
+            row.avail:Hide()
+            row.title:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
+            row.title:SetText(UI.LevelRange(it.chain.quests) .. it.chain.name)
             row.id:SetText(#it.chain.quests .. " кв.")
             for i = 1, MAX_COLS do
                 local col, full = row.cols[i], UI.cols[i]
@@ -1085,7 +1123,16 @@ local function BuildZonesPage(page)
                 end
             end
         else
-            row.title:SetText(QW.TitleOrID(it.id))
+            row.title:SetText(QW.LevelTag(it.id) .. QW.TitleOrID(it.id))
+            local st = QW.QuestStatus(QW.me, it.id)
+            if st == "done" then
+                row.title:SetTextColor(0.6, 0.6, 0.6)
+            elseif it.fromDB and not st then
+                row.title:SetTextColor(0.85, 0.85, 0.85)   -- никто из вас не брал
+            else
+                row.title:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
+            end
+            row.avail:SetShown(it.doable == true and st == nil)
             row.id:SetText(it.id)
             for i = 1, MAX_COLS do row.prog[i]:Hide() end
             UpdateStatusCols(row, UI.cols, it.id)
@@ -1130,7 +1177,11 @@ local function BuildZonesPage(page)
             end
             parts[#parts + 1] = QW.ColoredName(full, true) .. " |cffffffff" .. n .. "|r"
         end
-        self.sub:SetText((z.cont or OTHER_CONT) .. "  /  " .. #z.quests .. " квестов  /  " .. table.concat(parts, "   "))
+        local nDB = 0
+        for _ in pairs(z.fromDB or {}) do nDB = nDB + 1 end
+        self.sub:SetText((z.cont or OTHER_CONT) .. "  /  " .. #z.quests .. " квестов"
+            .. (nDB > 0 and (" |cff888888(" .. nDB .. " из базы Questie)|r") or "")
+            .. "  /  " .. table.concat(parts, "   "))
 
         local data = {}
         if self.mode == "chains" then
@@ -1146,20 +1197,38 @@ local function BuildZonesPage(page)
             table.sort(data, function(a, b) return (a.chain.name or "") < (b.chain.name or "") end)
             self.rightEmpty:SetText("В этой зоне цепочки не найдены.")
         else
-            self.headerText:SetText("КВЕСТ  /  ID")
+            self.headerText:SetText("[УР.] КВЕСТ  /  ID")
             QW.RequestTitles(z.quests)
             local hide = QW.db.settings.hideUntitled
             for _, q in ipairs(z.quests) do
                 local title = QW.GetTitle(q, true)
                 local ok = (title or not hide) and MatchSearch(UI.search, q, title)
-                if ok and self.mode == "notme" and QW.QuestStatus(QW.me, q) == "done" then ok = false end
-                if ok then data[#data + 1] = { id = q, title = title or "" } end
+                local st = ok and QW.QuestStatus(QW.me, q)
+                if ok and self.mode == "notme" and st == "done" then ok = false end
+                local doable
+                if ok and st == nil then doable = QW.IsDoable(q) end
+                if ok and self.mode == "avail" and doable ~= true then ok = false end
+                if ok then
+                    data[#data + 1] = { id = q, title = title or "", lvl = QW.GetQuestLevel(q),
+                        fromDB = z.fromDB[q], doable = doable }
+                end
             end
             table.sort(data, function(a, b)
+                local la, lb = a.lvl or 999, b.lvl or 999
+                if la ~= lb then return la < lb end
                 if a.title ~= b.title then return a.title < b.title end
                 return a.id < b.id
             end)
-            self.rightEmpty:SetText(self.mode == "notme" and "Ты сделал все известные квесты этой зоны." or "Здесь пусто.")
+            local hasDB = QW.GetQuestieZones() ~= nil
+            if self.mode == "notme" then
+                self.rightEmpty:SetText(hasDB and "Ты сделал все квесты этой зоны (по базе Questie и вашим данным)."
+                    or "Из квестов, которые вы брали, ты сделал всё.\n\nПолного списка квестов зоны нет: база Questie ещё не загрузилась или не найдена.")
+            elseif self.mode == "avail" then
+                self.rightEmpty:SetText(hasDB and "Сейчас в этой зоне нечего взять.\nКвесты могут требовать уровень или предыдущий квест."
+                    or "Список доступных квестов берётся из базы Questie, а она ещё не загрузилась или не найдена.")
+            else
+                self.rightEmpty:SetText("Здесь пусто.")
+            end
         end
         self.list:SetData(data, self.shownZone == z.name and self.shownMode == self.mode)
         self.shownZone, self.shownMode = z.name, self.mode
@@ -1275,7 +1344,7 @@ local function BuildComparePage(page)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
         return row
     end, function(row, it)
-        row.title:SetText(QW.TitleOrID(it.id))
+        row.title:SetText(QW.LevelTag(it.id) .. QW.TitleOrID(it.id))
         row.id:SetText(it.id)
         UpdateStatusCols(row, page.cols, it.id)
     end)
@@ -1837,6 +1906,8 @@ local function Debounced()
 end
 QW.On("DATA_CHANGED", Debounced)
 QW.On("SYNC_PROGRESS", function() if frame and frame:IsShown() then UpdateSidebar() end end)
+-- Questie догрузил базу — пересобираем зоны и цепочки
+QW.On("QUESTIE_READY", function() UI.RefreshAll() end)
 QW.On("TITLES_LOADED", function()
     if not frame or not frame:IsShown() then return end
     -- Названия подгрузились — перерисовываем без пересборки цепочек
