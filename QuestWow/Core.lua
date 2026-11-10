@@ -2,7 +2,7 @@
 local ADDON, QW = ...
 _G.QuestWow = QW
 
-QW.VERSION = "1.2.0"
+QW.VERSION = "1.2.1"
 QW.DB_VERSION = 1
 
 -------------------------------------------------------------------------------
@@ -523,5 +523,6 @@ ev:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_LEVEL_UP" then
         local ch = QW.GetChar(QW.me, true)
         ch.level = arg1 or UnitLevel("player")
+        QW.Fire("DATA_CHANGED")   -- список "Можно взять" зависит от уровня
     end
 end)

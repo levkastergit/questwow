@@ -290,10 +290,16 @@ local function ShowQuestTooltip(owner, questID, extra)
         end
     end
     if QW.QuestStatus(QW.me, questID) == nil then
-        local doable = QW.IsDoable(questID)
-        if doable == true then
-            GameTooltip:AddLine("Можно взять сейчас", 0.35, 0.9, 0.45)
-        elseif doable == false then
+        local avail, lvl = QW.Availability(questID)
+        local pl = UnitLevel("player") or 0
+        if avail == "ok" then
+            local trivial = QW.IsTrivial(questID)
+            GameTooltip:AddLine("Можно взять сейчас" .. (trivial and " (серый: мало опыта)" or ""), 0.35, 0.9, 0.45)
+        elseif avail == "low" then
+            GameTooltip:AddLine("Взять можно с " .. lvl .. " уровня (тебе ещё " .. (lvl - pl) .. " ур.)", 1, 0.45, 0.45)
+        elseif avail == "high" then
+            GameTooltip:AddLine("Твой уровень слишком высокий (максимум " .. lvl .. ")", 1, 0.45, 0.45)
+        elseif avail == "prereq" then
             local why = QW.DoableText(questID)
             GameTooltip:AddLine("Сейчас взять нельзя" .. (why and (": " .. why) or ""), 1, 0.45, 0.45, true)
         end
@@ -1123,7 +1129,15 @@ local function BuildZonesPage(page)
                 end
             end
         else
-            row.title:SetText(QW.LevelTag(it.id) .. QW.TitleOrID(it.id))
+            local note = ""
+            if it.avail == "low" then
+                note = "  |cffff7070с " .. it.availLvl .. " ур.|r"
+            elseif it.avail == "high" then
+                note = "  |cff888888до " .. it.availLvl .. " ур.|r"
+            elseif it.avail == "prereq" then
+                note = "  |cff888888нужен пред. квест|r"
+            end
+            row.title:SetText(QW.LevelTag(it.id) .. QW.TitleOrID(it.id) .. note)
             local st = QW.QuestStatus(QW.me, it.id)
             if st == "done" then
                 row.title:SetTextColor(0.6, 0.6, 0.6)
@@ -1132,7 +1146,7 @@ local function BuildZonesPage(page)
             else
                 row.title:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
             end
-            row.avail:SetShown(it.doable == true and st == nil)
+            row.avail:SetShown(it.avail == "ok" and st == nil)
             row.id:SetText(it.id)
             for i = 1, MAX_COLS do row.prog[i]:Hide() end
             UpdateStatusCols(row, UI.cols, it.id)
@@ -1205,12 +1219,12 @@ local function BuildZonesPage(page)
                 local ok = (title or not hide) and MatchSearch(UI.search, q, title)
                 local st = ok and QW.QuestStatus(QW.me, q)
                 if ok and self.mode == "notme" and st == "done" then ok = false end
-                local doable
-                if ok and st == nil then doable = QW.IsDoable(q) end
-                if ok and self.mode == "avail" and doable ~= true then ok = false end
+                local avail, availLvl
+                if ok and st == nil then avail, availLvl = QW.Availability(q) end
+                if ok and self.mode == "avail" and avail ~= "ok" then ok = false end
                 if ok then
                     data[#data + 1] = { id = q, title = title or "", lvl = QW.GetQuestLevel(q),
-                        fromDB = z.fromDB[q], doable = doable }
+                        fromDB = z.fromDB[q], avail = avail, availLvl = availLvl }
                 end
             end
             table.sort(data, function(a, b)
@@ -1224,7 +1238,7 @@ local function BuildZonesPage(page)
                 self.rightEmpty:SetText(hasDB and "Ты сделал все квесты этой зоны (по базе Questie и вашим данным)."
                     or "Из квестов, которые вы брали, ты сделал всё.\n\nПолного списка квестов зоны нет: база Questie ещё не загрузилась или не найдена.")
             elseif self.mode == "avail" then
-                self.rightEmpty:SetText(hasDB and "Сейчас в этой зоне нечего взять.\nКвесты могут требовать уровень или предыдущий квест."
+                self.rightEmpty:SetText(hasDB and "Сейчас в этой зоне нечего взять по твоему уровню.\nПереключись на 'Не сделано мной' — там у каждого квеста видно, с какого уровня он доступен."
                     or "Список доступных квестов берётся из базы Questie, а она ещё не загрузилась или не найдена.")
             else
                 self.rightEmpty:SetText("Здесь пусто.")

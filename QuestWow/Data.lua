@@ -69,6 +69,33 @@ function QW.QuestieInfo(id)
     return QuestieQuest(id)
 end
 
+-- Можно ли взять квест с учётом уровня. Как в Questie:
+--   requiredLevel  — минимальный уровень персонажа (QuestieDB.IsDoableVerbose: UnitLevel < requiredLevel -> "Level too low")
+--   requiredMaxLevel — 0 = без ограничения, иначе уровень персонажа не должен быть выше
+-- QuestieDB.IsDoable уровень НЕ проверяет (раса, класс, предыдущие квесты, репутация...).
+-- Возвращает: "ok" | "low", minLevel | "high", maxLevel | "prereq" | nil (нет данных)
+function QW.Availability(id)
+    local pl = UnitLevel("player") or 0
+    local q = QuestieQuest(id)
+    if q then
+        local req, maxL = tonumber(q.requiredLevel), tonumber(q.requiredMaxLevel)
+        if req and pl < req then return "low", req end
+        if maxL and maxL ~= 0 and pl > maxL then return "high", maxL end
+    end
+    local doable = QW.IsDoable(id)
+    if doable == nil then return nil end
+    return doable and "ok" or "prereq"
+end
+
+-- Квест "серый" (мало опыта). Нужна GetQuestGreenRange, иначе nil.
+function QW.IsTrivial(id)
+    local lvl = QW.GetQuestLevel(id)
+    if not lvl or not GetQuestGreenRange then return nil end
+    local ok, range = pcall(GetQuestGreenRange, "player")
+    if not ok or not tonumber(range) then return nil end
+    return lvl < (UnitLevel("player") or 0) - range
+end
+
 -------------------------------------------------------------------------------
 -- Названия квестов
 -------------------------------------------------------------------------------
